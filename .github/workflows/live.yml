@@ -1,0 +1,52 @@
+name: refresh live data
+
+# Re-scrapes PvPoke rankings + cup definitions + the GBL cup schedule and commits
+# the small live/ tree that the app fetches at runtime. No secrets needed: the
+# built-in GITHUB_TOKEN can push to this repo.
+
+on:
+  schedule:
+    # every 6 hours, offset off the hour to be kind to the sources
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: live-data
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Scrape
+        run: python3 scrape_live.py
+
+      - name: Show what changed
+        run: |
+          git status --short live | head -40
+          python3 - <<'PY'
+          import json
+          i = json.load(open("live/index.json"))
+          print("updated:", i["updated"], " source:", i["source"], " keys:", len(i["keys"]))
+          PY
+
+      - name: Commit and push
+        run: |
+          git config user.name  "live-data-bot"
+          git config user.email "live-data-bot@users.noreply.github.com"
+          git add live
+          if git diff --quiet --cached; then
+            echo "no change"
+          else
+            git commit -m "live data $(date -u +%Y-%m-%dT%H:%MZ)"
+            git push
+          fi
