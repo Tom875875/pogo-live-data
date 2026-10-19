@@ -166,11 +166,17 @@ def join_and(items, word="and"):
     if len(items) == 2: return items[0] + " " + word + " " + items[1]
     return ", ".join(items[:-1]) + " " + word + " " + items[-1]
 
-def cup_rules(cdef):
-    """One short phrase per restriction, for the app's cup description."""
+def cup_rules(cdef, cp=None):
+    """One short phrase per restriction, for the app's cup description.
+
+    Some excludes carry a `leagues` list — they only apply at those CP caps
+    (e.g. Mega Great League bans 5 overpowered megas, but Mega Ultra/Master
+    don't).  Pass cp to drop the ones that don't apply to this edition.
+    """
     out = []
     inc = cdef.get("include") or []
-    exc = cdef.get("exclude") or []
+    exc = [f for f in (cdef.get("exclude") or [])
+           if cp is None or not f.get("leagues") or cp in f["leagues"]]
 
     def vals(fs, kind):
         got = []
@@ -224,9 +230,49 @@ def cup_rules(cdef):
 
 
 cups = {}
+
+def emit_cup(name, cp, arr, cdef, title, short):
+    """Store one published cup edition: its ranking order, movesets, matchups."""
+    ids = [e["speciesId"] for e in arr]
+    leagues[name] = ids
+    pos = {sid: i for i, sid in enumerate(ids)}
+    ms, best, worst = [], [], []
+    for i, e in enumerate(arr):
+        ms.append([moveIdx.get(m, -1) for m in e.get("moveset", [])])
+        if i < CUP_MATCH_N:
+            best.append([pos.get(o["opponent"], -1) for o in e.get("matchups", [])[:CUP_MATCH_K]])
+            worst.append([pos.get(o["opponent"], -1) for o in e.get("counters", [])[:CUP_MATCH_K]])
+    detail[name] = {"ms": ms, "best": best, "worst": worst}
+    rules = cup_rules(cdef, cp)
+    cups[name] = {"title": title, "short": short, "cp": cp, "n": len(ids),
+                  "rules": rules, "desc": " · ".join(rules)}
+    print(f"  cup {name:20s} {title[:34]:36s} CP {cp:<6} {len(ids):4d} ranked | {' · '.join(rules)}",
+          file=sys.stderr)
+
+# Mega League is ONE gamemaster format ("All Pokemon" = the whole league pool plus
+# every Mega Evolution) that PvPoke publishes at all three CP caps.  We keep each
+# edition as its own cup id so the app can treat Mega Great / Ultra / Master as
+# three separate, individually-ranked formats.
+MEGA_EDITIONS = [
+    ("mega",        1500,  "Mega Great League", "Mega GL"),
+    ("mega_ultra",  2500,  "Mega Ultra League", "Mega UL"),
+    ("mega_master", 10000, "Mega Master League", "Mega ML"),
+]
+
 for cdef in gm.get("cups", []):
     name = cdef.get("name")
     if not name or name in CUP_SKIP:
+        continue
+    if name == "mega":
+        for cid, cp, title, short in MEGA_EDITIONS:
+            try:
+                arr = fetch_live(f"{LIVE}/rankings/mega/overall/rankings-{cp}.json")
+            except Exception:
+                print(f"  WARN: no published rankings for '{title}' (CP {cp}) — skipped",
+                      file=sys.stderr)
+                continue
+            if isinstance(arr, list) and arr:
+                emit_cup(cid, cp, arr, cdef, title, short)
         continue
     picked = None
     for cp in CUP_CP_ORDER:
@@ -240,22 +286,8 @@ for cdef in gm.get("cups", []):
         print(f"  WARN: no published rankings for cup '{name}' — skipped", file=sys.stderr)
         continue
     cp, arr = picked
-    ids = [e["speciesId"] for e in arr]
-    leagues[name] = ids
-    pos = {sid: i for i, sid in enumerate(ids)}
-    ms, best, worst = [], [], []
-    for i, e in enumerate(arr):
-        ms.append([moveIdx.get(m, -1) for m in e.get("moveset", [])])
-        if i < CUP_MATCH_N:
-            best.append([pos.get(o["opponent"], -1) for o in e.get("matchups", [])[:CUP_MATCH_K]])
-            worst.append([pos.get(o["opponent"], -1) for o in e.get("counters", [])[:CUP_MATCH_K]])
-    detail[name] = {"ms": ms, "best": best, "worst": worst}
     title = CUP_TITLE_FIX.get(name) or cdef.get("title") or name
-    rules = cup_rules(cdef)
-    cups[name] = {"title": title, "short": CUP_SHORT_FIX.get(name) or cup_short(title),
-                  "cp": cp, "n": len(ids), "rules": rules, "desc": " · ".join(rules)}
-    print(f"  cup {name:20s} {title[:34]:36s} CP {cp:<6} {len(ids):4d} ranked | {' · '.join(rules)}",
-          file=sys.stderr)
+    emit_cup(name, cp, arr, cdef, title, CUP_SHORT_FIX.get(name) or cup_short(title))
 
 # ---- GBL season schedule (which cup is live right now) ------------------------
 # GBL rotations are not in PvPoke's data, so we read battleflow.app's calendar and
@@ -308,20 +340,33 @@ def parse_calendar(html, year):
         m = re.search(r'flex-1">([A-Z][a-z]{2} \d+)\s*[–-]\s*([A-Z][a-z]{2} \d+)</span>', wk)
         if not m: continue
         s_mon, s_day = m.group(1).split(); e_mon, e_day = m.group(2).split()
-        names = re.findall(r'class="font-bold text-white">([^<]+)</span>', wk)
-        cps   = re.findall(r'text-white/40">([^<]+)</span>', wk)
         ws, we = iso(s_mon, int(s_day)), iso(e_mon, int(e_day))
-        entries = []
-        for i, nm in enumerate(names):
-            cp = cps[i] if i < len(cps) else ""
+        entries, leagues = [], []
+        # each league / cup is one row; the row carries the icon and any badge
+        for row in re.split(r'flex items-start gap-4 py-3\.5', wk)[1:]:
+            nm = re.search(r'class="font-bold text-white">([^<]+)</span>', row)
+            if not nm: continue
+            nm = nm.group(1).strip()
+            cp = re.search(r'text-white/40">([^<]+)</span>', row)
+            cp = cp.group(1) if cp else ""
+            icon = re.search(r'cups/([a-z0-9_]+)\.webp', row)
+            # "Mega Edition" seasons flag the *slot*, not just the format: an open
+            # league marked mega is Mega Great/Ultra/Master League that week.
+            mega = bool(re.search(r'>(Mega Edition)<', row)) or bool(
+                    icon and re.search(r'_mega$', icon.group(1)) and "League" in nm)
             mc = re.search(r"(\d+)", cp.replace(",", ""))
             is_cup = "League" not in nm
-            entries.append({"name": nm, "cp": int(mc.group(1)) if mc else None,
+            cpn = int(mc.group(1)) if mc else None
+            entries.append({"name": nm, "cp": cpn, "mega": mega,
                             "cup": resolve_cup(nm) if is_cup else None})
+            if not is_cup:
+                # an open-league slot; "Unlimited" means no CP cap
+                leagues.append({"name": nm, "cap": cpn if cpn else 10000, "mega": mega})
         out["weeks"].append({
             "start": ws, "end": we,
             "current": bool(ws and we and ws <= today < we),
             "label": f"{m.group(1)} – {m.group(2)}",
+            "leagues": leagues,
             "cups": [e for e in entries if e["cup"] or "League" not in e["name"]],
         })
     if out["start"]:
@@ -367,6 +412,31 @@ if schedule:
             if past: cups[cid]["when"] = past[-1]["start"]
             if fut:  cups[cid]["next"] = fut[0]["start"]
 
+    # mega leagues are *league slots*, not cups — annotate them from the slot flag
+    for cid, cp, _t, _s in MEGA_EDITIONS:
+        if cid not in cups: continue
+        hits = [w for w in schedule["weeks"]
+                if any(l.get("cap") == cp and l.get("mega") for l in w.get("leagues", []))]
+        cur = next((w for w in hits if w["start"] and w["end"] and w["start"] <= today < w["end"]), None)
+        if cur:
+            cups[cid]["current"] = True
+            cups[cid]["when"] = cur["start"]
+            cups[cid]["ends"] = cur["end"]
+        else:
+            past = [w for w in hits if w["end"] and w["end"] <= today]
+            fut  = [w for w in hits if w["start"] and w["start"] > today]
+            if past: cups[cid]["when"] = past[-1]["start"]
+            if fut:  cups[cid]["next"] = fut[0]["start"]
+        # when a mega league is live, the *normal* league of that cap is displaced:
+        # record when it comes back, so the tab can say "returns Oct 20"
+        off = [w for w in schedule["weeks"]
+               if any(l.get("cap") == cp and not l.get("mega") for l in w.get("leagues", []))]
+        fut_off = [w for w in off if w["start"] and w["start"] > today]
+        if cur and fut_off:
+            cups[cid]["displacedBack"] = fut_off[0]["start"]
+        elif cur:
+            cups[cid]["displacedBack"] = None   # normal league is out for the season
+
 data = {
     "timestamp": gm.get("timestamp"),
     "cpm": CPM,
@@ -380,7 +450,16 @@ data = {
     "detail": detail,
     "evolutions": evolutions,
     "cups": cups,
-    "schedule": schedule,
+    # the app's own app_data.json ships the schedule *with* the open-league slots,
+    # so the live copy must carry them too — otherwise a live update would drop
+    # the mega flags and the rotation would lose its Mega Editions.
+    "schedule": ({
+        **schedule,
+        "weeks": [
+            {**w, "leagues": [dict(l) for l in w.get("leagues", [])]}
+            for w in schedule.get("weeks", [])
+        ],
+    } if schedule else None),
 }
 
 out = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
