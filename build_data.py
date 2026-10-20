@@ -321,6 +321,16 @@ def resolve_cup(name):
         if kk and len(kk) > 4 and (kk in nt or nt in kk): return cid
     return None
 
+# GBL swaps formats at 1pm Pacific, not at midnight. The calendar only carries
+# dates, so on a swap day everything below would flip to the next week up to ~20
+# hours early. Treat the day as not-yet-turned until 1pm Pacific has passed.
+def rotation_today():
+    now = datetime.datetime.now(datetime.timezone.utc)
+    pac = now - datetime.timedelta(hours=7)          # PDT (UTC-7); PST would be -8
+    if pac.hour < 13:                                # before 1pm Pacific the day hasn't turned
+        pac -= datetime.timedelta(days=1)
+    return pac.date().isoformat()
+
 def parse_calendar(html, year):
     out = {"season": None, "start": None, "end": None, "weeks": []}
     m = re.search(r'uppercase tracking-\[0\.25em\][^>]*>Season</div>\s*<div[^>]*>([^<]+)</div>', html)
@@ -335,7 +345,7 @@ def parse_calendar(html, year):
         mm = MONTHS.get(mon)
         y = year + (1 if mm and out.get("start") and mm < MONTHS.get(out["start"][0], mm) else 0)
         return f"{y:04d}-{mm:02d}-{day:02d}" if mm else None
-    today = datetime.date.today().isoformat()
+    today = rotation_today()
     for wk in re.split(r'data-testid="calendar-week"', html)[1:]:
         m = re.search(r'flex-1">([A-Z][a-z]{2} \d+)\s*[–-]\s*([A-Z][a-z]{2} \d+)</span>', wk)
         if not m: continue
@@ -396,8 +406,10 @@ except Exception as e:
     print(f"  WARN: no cup schedule available ({e})", file=sys.stderr)
 
 # annotate each cup with when it is/was live (for the picker labels)
+# GBL rotates at 1pm Pacific, not midnight: on a swap day the cup is not live yet
+# until that moment, so shift the comparison day accordingly.
 if schedule:
-    today = datetime.date.today().isoformat()
+    today = rotation_today()
     for cid in cups:
         hits = [w for w in schedule["weeks"]
                 if any(x.get("cup") == cid for x in w.get("cups", []))]
