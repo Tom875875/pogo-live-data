@@ -81,6 +81,30 @@ def main():
     # into the middle of its list; it needs this list to build that mapping
     move_ids = d.get("moveIds", [])
 
+    # ---- raid rotation -------------------------------------------------------
+    # the same boss set the app bakes in, split by tier so the Raid attackers view
+    # can show what is actually live this week rather than every boss ever
+    bosses = d.get("bosses", {}) or {}
+    boss_meta = d.get("bossMeta", {}) or {}
+    t5     = [bid for bid, b in bosses.items() if b.get("tier") == "t5" and not b.get("shadow")]
+    shadow = [bid for bid, b in bosses.items() if b.get("tier") == "t5" and b.get("shadow")]
+    mega   = [bid for bid, b in bosses.items() if b.get("tier") == "mega"]
+    allr   = t5 + shadow + mega
+    raid_live = {
+        "v": LIVE_VERSION,
+        "updated": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source": d.get("timestamp"),
+        "t5": t5,
+        "shadow": shadow,
+        "mega": mega,
+        "all": allr,
+        "n": boss_meta.get("n5", len(t5) + len(shadow)),
+        "nm": boss_meta.get("nm", len(mega)),
+    }
+    rb = json.dumps(raid_live, separators=(",", ":"), ensure_ascii=False)
+    with open(os.path.join(args.out, "raid.json"), "w", encoding="utf-8") as fh:
+        fh.write(rb)
+
     index = {
         "v": LIVE_VERSION,
         "updated": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -90,13 +114,14 @@ def main():
         "moveSha": sha16(",".join(move_ids)),
         "cups": d.get("cups", {}),
         "schedule": d.get("schedule", {}),
+        "raid": raid_live,
     }
     ib = json.dumps(index, separators=(",", ":"), ensure_ascii=False)
     with open(os.path.join(args.out, "index.json"), "w", encoding="utf-8") as fh:
         fh.write(ib)
 
-    print("live/ written: %d keys, %.0f KB total, index %.1f KB"
-          % (len(keys), total / 1024.0, len(ib.encode("utf-8")) / 1024.0), file=sys.stderr)
+    print("live/ written: %d keys, %.0f KB total, index %.1f KB, raid %d items"
+          % (len(keys), total / 1024.0, len(ib.encode("utf-8")) / 1024.0, len(allr)), file=sys.stderr)
     biggest = sorted(keys.items(), key=lambda kv: -kv[1]["bytes"])[:5]
     for k, v in biggest:
         print("  %-20s %6.1f KB  n=%d" % (k, v["bytes"] / 1024.0, v["n"]), file=sys.stderr)
